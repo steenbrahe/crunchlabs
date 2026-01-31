@@ -60,6 +60,9 @@
 #define right 0x1B
 #define up 0x1D
 #define down 0x15
+#define vol_minus 0x7
+#define vol_plus 0x6
+#define mute 0x1E
 #define ok 0x19
 #define cmd1 0x3
 #define cmd2 0xE
@@ -112,8 +115,19 @@ int rollPrecision = 158; // this variable represents the time in milliseconds th
 int pitchMax = 150; // this sets the maximum angle of the pitch servo to prevent it from crashing, it should remain below 180, and be greater than the pitchMin
 int pitchMin = 33; // this sets the minimum angle of the pitch servo to prevent it from crashing, it should remain above 0, and be less than the pitchMax
 
+// Distance sensor mode settings
+// Mode 1: detect when distance > MAX_DISTANCE (object moved away)
+// Mode 2: detect when distance < MIN_DISTANCE (object approached)
+// Mode 3: distance sensing disabled (default)
+#define MAX_DISTANCE 40  // cm - threshold for "far" detection
+#define MIN_DISTANCE 100   // cm - threshold for "near" detection
+#define FIRE_COOLDOWN 500  // ms - minimum time between distance-triggered fires
+int distanceMode = 3;     // current mode (1, 2, or 3)
+unsigned long lastDistanceFireTime = 0;  // tracks last fire time for cooldown
+
 void shakeHeadYes(int moves = 3); //function prototypes for shakeHeadYes and No for proper compiling
 void shakeHeadNo(int moves = 3);
+void fire(int moves = 1);  // function prototype for fire
 #pragma endregion PINS AND PARAMS
 
 //////////////////////////////////////////////////
@@ -147,30 +161,21 @@ void setup() { //this is our setup function - it runs once on start up, and is b
 #pragma region LOOP
 
 void loop() {
+    
 
     /*
     * Check if received data is available and if yes, try to decode it.
     */
     if (IrReceiver.decode()) {
-        Serial.println("hello world1");
-        float distance = getDistance();  // returns distance in cm, prints to serial
-
-        /*
-        * Print a short summary of received data
-        */
-        IrReceiver.printIRResultShort(&Serial);
-        IrReceiver.printIRSendUsage(&Serial);
-        if (IrReceiver.decodedIRData.protocol == UNKNOWN) { //command garbled or not recognized
-            Serial.println(F("Received noise or an unknown (or not yet enabled) protocol - if you wish to add this command, define it at the top of the file with the hex code printed below (ex: 0x8)"));
-            // We have an unknown protocol here, print more info
-            IrReceiver.printIRResultRawFormatted(&Serial, true);
+        // Skip unknown protocols (often noise from ultrasonic sensor)
+        if (IrReceiver.decodedIRData.protocol == UNKNOWN) {
+            IrReceiver.resume();
+            return;
         }
+
+        IrReceiver.printIRResultShort(&Serial);
         Serial.println();
 
-        /*
-        * !!!Important!!! Enable receiving of the next value,
-        * since receiving has stopped after the end of the current received data packet.
-        */
         IrReceiver.resume(); // Enable receiving of the next value
 
 
@@ -206,6 +211,21 @@ void loop() {
               delay(50);
               break;
 
+            case vol_minus:  // Set mode 1: detect far objects
+              distanceMode = 1;
+              Serial.println("Mode 1: detecting distance > MAX_DISTANCE");
+              break;
+
+            case vol_plus:   // Set mode 2: detect near objects
+              distanceMode = 2;
+              Serial.println("Mode 2: detecting distance < MIN_DISTANCE");
+              break;
+
+            case mute:       // Set mode 3: disable distance sensing
+              distanceMode = 3;
+              Serial.println("Mode 3: distance sensing disabled");
+              break;
+
             case cmd1:
               Serial.println("cmd1 entered");
               if (!passcodeEntered) addPasscodeDigit('1');
@@ -223,7 +243,27 @@ void loop() {
 
         }
     }
-    delay(5);
+
+    // Distance detection based on current mode
+    if (distanceMode == 1 || distanceMode == 2) {
+        float distance = getDistance();
+        bool shouldFire = false;
+
+        if (distanceMode == 1 && distance > MAX_DISTANCE) {
+            Serial.println("Mode 1: far detected. Distance: " + String(distance) + "cm.");
+            shouldFire = true;
+        } else if (distanceMode == 2 && distance > 0 && distance < MIN_DISTANCE) {
+            Serial.println("Mode 2: near detected. Distance: " + String(distance) + "cm.");
+            shouldFire = true;
+        }
+
+        if (shouldFire && (millis() - lastDistanceFireTime >= FIRE_COOLDOWN)) {
+            fire(2);
+            lastDistanceFireTime = millis();
+        }
+    }
+
+    delay(50);
 }
 
 #pragma endregion LOOP
@@ -299,12 +339,15 @@ void downMove (int moves){ // function to tilt down
   }
 }
 
-void fire() { //function for firing a single dart
+void fire(int moves = 1) { //function for firing a single dart
+  for (int i = 0; i < moves; i++){
     rollServo.write(rollStopSpeed + rollMoveSpeed);//start rotating the servo
     delay(rollPrecision);//time for approximately 60 degrees of rotation
     rollServo.write(rollStopSpeed);//stop rotating the servo
-    delay(5); //delay for smoothness
-    Serial.println("FIRING");
+    
+  }
+  delay(5); //delay for smoothness
+  Serial.println("FIRING");
 }
 
 void fireAll() { //function to fire all 6 darts at once
@@ -374,10 +417,20 @@ void shakeHeadNo(int moves = 3) {
 
 float getDistance() {
     float distance = distanceSensor.measureDistanceCm();
-    Serial.print("Distance: ");
-    Serial.print(distance);
-    Serial.println(" cm");
+    // Serial.print("Distance: ");
+    // Serial.print(distance);
+    // Serial.println(" cm");
     return distance;
+}
+
+void printDistance(float distance) {
+    if (distance >= 0) {
+        Serial.print("Distance: ");
+        Serial.print(distance);
+        Serial.println(" cm");
+    } else {
+        Serial.println("Out of range");
+    }
 }
 #pragma endregion FUNCTIONS
 
