@@ -63,15 +63,16 @@
 #define IR_VOL_PLUS  0x06
 #define IR_MUTE      0x1E
 #define IR_OK        0x19
-#define IR_CMD1      0x03
-#define IR_CMD2      0x0E
+#define IR_TREMBLE_MINUS      0x03
+#define IR_TREMBLE_PLUS  0x04
 #define IR_CMD3      0x47
 #define IR_CMD4      0x44
 #define IR_CMD5      0x40
 #define IR_CMD6      0x43
 // #define IR_CMD7   0x07  // Same as IR_VOL_MINUS - commented out
 // #define IR_CMD8   0x15  // Same as IR_DOWN - commented out
-#define IR_CMD9      0x09
+#define IR_BASS_PLUS 0xE   // BASS +
+#define IR_BASS_MINUS 0x1A //
 // #define IR_CMD0   0x19  // Same as IR_OK - commented out
 #define IR_STAR      0x16
 // #define IR_HASHTAG 0x0D // Same as IR_LEFT - commented out
@@ -91,6 +92,7 @@ constexpr uint8_t PIN_IR_RECEIVER = 9;
 constexpr uint8_t PIN_TRIG        = 7;
 constexpr uint8_t PIN_ECHO        = 8;
 constexpr uint8_t PIN_BUZZER      = 6;
+constexpr uint8_t PIN_MIC         = 4;  // Sound sensor digital output (D0)
 // I2C OLED uses hardware pins: A4 (SDA), A5 (SCL)
 
 // OLED Display settings
@@ -141,6 +143,8 @@ constexpr int MIN_DISTANCE  = 100;  // cm - threshold for "near" detection
 constexpr int FIRE_COOLDOWN = 500;  // ms - minimum time between distance-triggered fires
 DistanceMode distanceMode = MODE_DISABLED;
 unsigned long lastDistanceFireTime = 0;  // tracks last fire time for cooldown
+unsigned long lastSoundFireTime = 0;     // tracks last sound-triggered fire time
+bool soundDetectEnabled = false;         // sound detection on/off
 float lastDistance = -1;  // last measured distance for display
 unsigned long lastFireDisplayTime = 0;  // tracks when to show "Firing..." message
 unsigned long lastDisplayUpdateTime = 0;  // throttle display updates
@@ -184,6 +188,9 @@ void setup() { //this is our setup function - it runs once on start up, and is b
     // Initialize buzzer
     pinMode(PIN_BUZZER, OUTPUT);
     digitalWrite(PIN_BUZZER, LOW);
+
+    // Initialize sound sensor
+    pinMode(PIN_MIC, INPUT_PULLUP);
 
     // Just to know which program is running on my microcontroller
     Serial.println(F("START " __FILE__ " from " __DATE__ "\r\nUsing library version " VERSION_IRREMOTE));
@@ -269,12 +276,19 @@ void loop() {
               updateDisplay();
               break;
 
-            case IR_CMD1:
+            case IR_BASS_MINUS:
+              soundDetectEnabled = !soundDetectEnabled;
+              Serial.print(F("Sound detection: "));
+              Serial.println(soundDetectEnabled ? F("ON") : F("OFF"));
+              updateDisplay();
+              break;
+
+            case IR_TREMBLE_MINUS:
               Serial.println(F("cmd1 entered"));
               if (!passcodeEntered) addPasscodeDigit('1');
               break;
 
-            case IR_CMD2:
+            case IR_BASS_PLUS:
               Serial.println(F("cmd2 entered"));
               if (!passcodeEntered) addPasscodeDigit('2');
               break;
@@ -316,6 +330,21 @@ void loop() {
             }
         }
     }
+
+    // Sound-triggered firing (checked every loop for responsiveness)
+    if (soundDetectEnabled) {
+        int micState = digitalRead(PIN_MIC);
+
+        // KY-037 D0 goes HIGH when sound exceeds threshold
+        if (passcodeEntered && micState == HIGH) {
+            if (millis() - lastSoundFireTime >= FIRE_COOLDOWN) {
+                Serial.println(F("Sound detected - firing!"));
+                fire(1);
+                lastSoundFireTime = millis();
+            }
+        }
+    }
+
     delay(5); // Small delay to avoid overwhelming the CPU
 }
 
@@ -343,6 +372,7 @@ void checkPasscode() {
 
 void addPasscodeDigit(char digit) {
     Serial.println("addPasscodeDigit() called");
+    beep(1, 10);
     if (!passcodeEntered && strlen(passcode) < PASSCODE_LENGTH) {
         strncat(passcode, &digit, 1);
         Serial.println(passcode);
@@ -396,7 +426,7 @@ void downMove (int moves){ // function to tilt down
 void fire(int moves) { //function for firing a single dart
   lastFireDisplayTime = millis();  // Start showing "Firing..." on display
   updateDisplay();
-  beep(1, 100);  // Short beep when firing
+  //beep(1, 100);  // Short beep when firing
   for (int i = 0; i < moves; i++){
     rollServo.write(ROLL_STOP_SPEED + ROLL_MOVE_SPEED);//start rotating the servo
     delay(ROLL_PRECISION);//time for approximately 60 degrees of rotation
@@ -477,13 +507,14 @@ void updateDisplay(const char* line2) {
     display.clearDisplay();
     display.setTextSize(1);
 
-    // Row 0: Always show mode and armed status
+    // Row 0: Show mode, sound status, and armed status
     display.setCursor(0, 0);
     switch(distanceMode) {
-        case MODE_FAR_DETECT:  display.print(F("MODE:FAR  ")); break;
-        case MODE_NEAR_DETECT: display.print(F("MODE:NEAR ")); break;
-        default:               display.print(F("MODE:OFF  ")); break;
+        case MODE_FAR_DETECT:  display.print(F("FAR ")); break;
+        case MODE_NEAR_DETECT: display.print(F("NEAR")); break;
+        default:               display.print(F("OFF ")); break;
     }
+    display.print(soundDetectEnabled ? F(" SND ") : F("     "));
     display.println(passcodeEntered ? F("ARMED") : F("LOCKED"));
 
     // Row 1: Passcode status
