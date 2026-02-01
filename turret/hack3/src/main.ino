@@ -90,6 +90,7 @@ constexpr uint8_t PIN_ROLL_SERVO  = 12;
 constexpr uint8_t PIN_IR_RECEIVER = 9;
 constexpr uint8_t PIN_TRIG        = 7;
 constexpr uint8_t PIN_ECHO        = 8;
+constexpr uint8_t PIN_BUZZER      = 6;
 // I2C OLED uses hardware pins: A4 (SDA), A5 (SCL)
 
 // OLED Display settings
@@ -149,6 +150,7 @@ void shakeHeadYes(int moves = 3); //function prototypes for shakeHeadYes and No 
 void shakeHeadNo(int moves = 3);
 void fire(int moves = 1);  // function prototype for fire
 void updateDisplay(const char* line2 = nullptr);  // function prototype for display
+void beep(int count = 1, int duration = 50, int pause = 50);  // function prototype for buzzer
 
 //////////////////////////////////////////////////
               //  S E T U P  //
@@ -178,6 +180,10 @@ void setup() { //this is our setup function - it runs once on start up, and is b
     yawServo.attach(PIN_YAW_SERVO);
     pitchServo.attach(PIN_PITCH_SERVO);
     rollServo.attach(PIN_ROLL_SERVO);
+
+    // Initialize buzzer
+    pinMode(PIN_BUZZER, OUTPUT);
+    digitalWrite(PIN_BUZZER, LOW);
 
     // Just to know which program is running on my microcontroller
     Serial.println(F("START " __FILE__ " from " __DATE__ "\r\nUsing library version " VERSION_IRREMOTE));
@@ -390,6 +396,7 @@ void downMove (int moves){ // function to tilt down
 void fire(int moves) { //function for firing a single dart
   lastFireDisplayTime = millis();  // Start showing "Firing..." on display
   updateDisplay();
+  beep(1, 100);  // Short beep when firing
   for (int i = 0; i < moves; i++){
     rollServo.write(ROLL_STOP_SPEED + ROLL_MOVE_SPEED);//start rotating the servo
     delay(ROLL_PRECISION);//time for approximately 60 degrees of rotation
@@ -402,6 +409,7 @@ void fire(int moves) { //function for firing a single dart
 void fireAll() { //function to fire all 6 darts at once
     lastFireDisplayTime = millis();  // Start showing "Firing..." on display
     updateDisplay();
+    beep(3, 50, 30);  // Triple beep for fire all
     rollServo.write(ROLL_STOP_SPEED + ROLL_MOVE_SPEED);//start rotating the servo
     delay(ROLL_PRECISION * 6); //time for 360 degrees of rotation
     rollServo.write(ROLL_STOP_SPEED);//stop rotating the servo
@@ -521,6 +529,17 @@ float getDistance() {
     // Serial.print(distance);
     // Serial.println(" cm");
     return distance;
+}
+
+void beep(int count, int duration, int pause) {
+    for (int i = 0; i < count; i++) {
+        digitalWrite(PIN_BUZZER, HIGH);
+        delay(duration);
+        digitalWrite(PIN_BUZZER, LOW);
+        if (i < count - 1) {
+            delay(pause);  // Pause between beeps (not after last one)
+        }
+    }
 }
 
 void printDistance(float distance) {
