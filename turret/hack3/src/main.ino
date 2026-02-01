@@ -1,7 +1,6 @@
 //////////////////////////////////////////////////
               //  LICENSE  //
 //////////////////////////////////////////////////
-#pragma region LICENSE
 /*
   ************************************************************************************
   * MIT License
@@ -28,24 +27,23 @@
   *
   ************************************************************************************
 */
-#pragma endregion LICENSE
 
 //////////////////////////////////////////////////
               //  LIBRARIES  //
 //////////////////////////////////////////////////
-#pragma region LIBRARIES
 
 #include <Arduino.h>
 #include <Servo.h>
 #include <IRremote.hpp>
 #include <HCSR04.h>
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
 
-#pragma endregion LIBRARIES
 
 //////////////////////////////////////////////////
                //  IR CODES  //
 //////////////////////////////////////////////////
-#pragma region IR CODES
 /*
 ** if you want to add other remotes (as long as they're on the same protocol above):
 ** press the desired button and look for a hex code similar to those below (ex: 0x11)
@@ -80,12 +78,10 @@
 
 #define DECODE_NEC  //defines the type of IR transmission to decode based on the remote. See IRremote library for examples on how to decode other types of remote
 
-#pragma endregion IR CODES
 
 //////////////////////////////////////////////////
           //  PINS AND PARAMETERS  //
 //////////////////////////////////////////////////
-#pragma region PINS AND PARAMS
 
 // Pin definitions - centralized for easy modification
 constexpr uint8_t PIN_YAW_SERVO   = 10;
@@ -94,6 +90,14 @@ constexpr uint8_t PIN_ROLL_SERVO  = 12;
 constexpr uint8_t PIN_IR_RECEIVER = 9;
 constexpr uint8_t PIN_TRIG        = 7;
 constexpr uint8_t PIN_ECHO        = 8;
+// I2C OLED uses hardware pins: A4 (SDA), A5 (SCL)
+
+// OLED Display settings
+constexpr uint8_t SCREEN_WIDTH  = 128;
+constexpr uint8_t SCREEN_HEIGHT = 32;   // Using 32 to save RAM (512 bytes vs 1024)
+constexpr int8_t  OLED_RESET    = -1;   // No reset pin
+constexpr uint8_t OLED_ADDRESS  = 0x3C; // Common I2C address (0x3C or 0x3D)
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
 // Passcode settings
 #define PASSCODE_LENGTH 4
@@ -136,18 +140,40 @@ constexpr int MIN_DISTANCE  = 100;  // cm - threshold for "near" detection
 constexpr int FIRE_COOLDOWN = 500;  // ms - minimum time between distance-triggered fires
 DistanceMode distanceMode = MODE_DISABLED;
 unsigned long lastDistanceFireTime = 0;  // tracks last fire time for cooldown
+float lastDistance = -1;  // last measured distance for display
+unsigned long lastFireDisplayTime = 0;  // tracks when to show "Firing..." message
+unsigned long lastDisplayUpdateTime = 0;  // throttle display updates
+constexpr unsigned long DISPLAY_UPDATE_INTERVAL = 500;  // ms between display refreshes
 
 void shakeHeadYes(int moves = 3); //function prototypes for shakeHeadYes and No for proper compiling
 void shakeHeadNo(int moves = 3);
 void fire(int moves = 1);  // function prototype for fire
-#pragma endregion PINS AND PARAMS
+void updateDisplay(const char* line2 = nullptr);  // function prototype for display
 
 //////////////////////////////////////////////////
               //  S E T U P  //
 //////////////////////////////////////////////////
-#pragma region SETUP
 void setup() { //this is our setup function - it runs once on start up, and is basically where we get everything "set up"
     Serial.begin(9600); // initializes the Serial communication between the computer and the microcontroller
+
+    // Add in setup() before display.begin():
+    Wire.begin();
+    Serial.println(F("Scanning I2C..."));
+    for(byte addr = 1; addr < 127; addr++) {
+        Wire.beginTransmission(addr);
+        if(Wire.endTransmission() == 0) {
+            Serial.print(F("Found: 0x"));
+            Serial.println(addr, HEX);
+        }
+    }
+
+    // Initialize OLED display
+    if(!display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDRESS)) {
+        Serial.println(F("SSD1306 allocation failed"));
+    } else {
+        display.setTextColor(SSD1306_WHITE);
+        updateDisplay("Enter passcode...");
+    }
 
     yawServo.attach(PIN_YAW_SERVO);
     pitchServo.attach(PIN_PITCH_SERVO);
@@ -164,12 +190,10 @@ void setup() { //this is our setup function - it runs once on start up, and is b
 
     homeServos(); //set servo motors to home position
 }
-#pragma endregion SETUP
 
 //////////////////////////////////////////////////
                //  L O O P  //
 //////////////////////////////////////////////////
-#pragma region LOOP
 
 void loop() {
     
@@ -224,16 +248,19 @@ void loop() {
             case IR_VOL_MINUS:
               distanceMode = MODE_FAR_DETECT;
               Serial.println(F("Mode 1: detecting distance > MAX_DISTANCE"));
+              updateDisplay();
               break;
 
             case IR_VOL_PLUS:
               distanceMode = MODE_NEAR_DETECT;
               Serial.println(F("Mode 2: detecting distance < MIN_DISTANCE"));
+              updateDisplay();
               break;
 
             case IR_MUTE:
               distanceMode = MODE_DISABLED;
               Serial.println(F("Mode 3: distance sensing disabled"));
+              updateDisplay();
               break;
 
             case IR_CMD1:
@@ -255,38 +282,41 @@ void loop() {
         }
     }
 
-    // Distance detection based on current mode
-    if (distanceMode == MODE_FAR_DETECT || distanceMode == MODE_NEAR_DETECT) {
-        float distance = getDistance();
-        bool shouldFire = false;
+    // Throttled distance measurement and display update
+    if (millis() - lastDisplayUpdateTime >= DISPLAY_UPDATE_INTERVAL) {
+        lastDisplayUpdateTime = millis();
+        lastDistance = getDistance();
+        updateDisplay();
 
-        if (distanceMode == MODE_FAR_DETECT && distance > MAX_DISTANCE) {
-            Serial.print(F("Mode 1: far detected. Distance: "));
-            Serial.print(distance);
-            Serial.println(F("cm."));
-            shouldFire = true;
-        } else if (distanceMode == MODE_NEAR_DETECT && distance > 0 && distance < MIN_DISTANCE) {
-            Serial.print(F("Mode 2: near detected. Distance: "));
-            Serial.print(distance);
-            Serial.println(F("cm."));
-            shouldFire = true;
-        }
+        // Distance-triggered firing (only when mode is active)
+        if (distanceMode == MODE_FAR_DETECT || distanceMode == MODE_NEAR_DETECT) {
+            bool shouldFire = false;
 
-        if (shouldFire && (millis() - lastDistanceFireTime >= FIRE_COOLDOWN)) {
-            fire(2);
-            lastDistanceFireTime = millis();
+            if (distanceMode == MODE_FAR_DETECT && lastDistance > MAX_DISTANCE) {
+                Serial.print(F("Mode 1: far detected. Distance: "));
+                Serial.print(lastDistance);
+                Serial.println(F("cm."));
+                shouldFire = true;
+            } else if (distanceMode == MODE_NEAR_DETECT && lastDistance > 0 && lastDistance < MIN_DISTANCE) {
+                Serial.print(F("Mode 2: near detected. Distance: "));
+                Serial.print(lastDistance);
+                Serial.println(F("cm."));
+                shouldFire = true;
+            }
+
+            if (shouldFire && (millis() - lastDistanceFireTime >= FIRE_COOLDOWN)) {
+                fire(2);
+                lastDistanceFireTime = millis();
+            }
         }
     }
-
-    delay(50);
+    delay(5); // Small delay to avoid overwhelming the CPU
 }
 
-#pragma endregion LOOP
 
 //////////////////////////////////////////////////
                // FUNCTIONS  //
 //////////////////////////////////////////////////
-#pragma region FUNCTIONS
 
 // Add these functions somewhere in your code
 void checkPasscode() {
@@ -294,9 +324,11 @@ void checkPasscode() {
     if (strcmp(passcode, CORRECT_PASSCODE) == 0) {
         Serial.println("CORRECT PASSCODE");
         passcodeEntered = true;
+        updateDisplay("ARMED!");
         shakeHeadYes();
     } else {
         passcodeEntered = false;
+        updateDisplay("Wrong passcode");
         shakeHeadNo();
         Serial.println("INCORRECT PASSCODE");
     }
@@ -308,6 +340,7 @@ void addPasscodeDigit(char digit) {
     if (!passcodeEntered && strlen(passcode) < PASSCODE_LENGTH) {
         strncat(passcode, &digit, 1);
         Serial.println(passcode);
+        updateDisplay();  // Display will show stars automatically
     }
 }
 
@@ -354,18 +387,21 @@ void downMove (int moves){ // function to tilt down
   }
 }
 
-void fire(int moves = 1) { //function for firing a single dart
+void fire(int moves) { //function for firing a single dart
+  lastFireDisplayTime = millis();  // Start showing "Firing..." on display
+  updateDisplay();
   for (int i = 0; i < moves; i++){
     rollServo.write(ROLL_STOP_SPEED + ROLL_MOVE_SPEED);//start rotating the servo
     delay(ROLL_PRECISION);//time for approximately 60 degrees of rotation
     rollServo.write(ROLL_STOP_SPEED);//stop rotating the servo
-    
   }
   delay(5); //delay for smoothness
   Serial.println("FIRING");
 }
 
 void fireAll() { //function to fire all 6 darts at once
+    lastFireDisplayTime = millis();  // Start showing "Firing..." on display
+    updateDisplay();
     rollServo.write(ROLL_STOP_SPEED + ROLL_MOVE_SPEED);//start rotating the servo
     delay(ROLL_PRECISION * 6); //time for 360 degrees of rotation
     rollServo.write(ROLL_STOP_SPEED);//stop rotating the servo
@@ -384,7 +420,7 @@ void homeServos(){ // sends servos to home positions
     Serial.println("HOMING");
 }
 
-void shakeHeadYes(int moves = 3) { //sets the default number of nods to 3, but you can pass in whatever number of nods you want
+void shakeHeadYes(int moves) { //sets the default number of nods to 3, but you can pass in whatever number of nods you want
       Serial.println("YES");
 
     if ((PITCH_MAX - pitchServoVal) < 15){
@@ -395,7 +431,6 @@ void shakeHeadYes(int moves = 3) { //sets the default number of nods to 3, but y
     pitchServo.write(pitchServoVal);
 
     int startAngle = pitchServoVal; // Current position of the pitch servo
-    int lastAngle = pitchServoVal;
     int nodAngle = startAngle + 15; // Angle for nodding motion
 
     for (int i = 0; i < moves; i++) { // Repeat nodding motion three times
@@ -414,7 +449,7 @@ void shakeHeadYes(int moves = 3) { //sets the default number of nods to 3, but y
     }
 }
 
-void shakeHeadNo(int moves = 3) {
+void shakeHeadNo(int moves) {
     Serial.println("NO");
 
     for (int i = 0; i < moves; i++) { // Repeat nodding motion three times
@@ -428,6 +463,56 @@ void shakeHeadNo(int moves = 3) {
         yawServo.write(YAW_STOP_SPEED);
         delay(50); // Pause at starting position
     }
+}
+
+void updateDisplay(const char* line2) {
+    display.clearDisplay();
+    display.setTextSize(1);
+
+    // Row 0: Always show mode and armed status
+    display.setCursor(0, 0);
+    switch(distanceMode) {
+        case MODE_FAR_DETECT:  display.print(F("MODE:FAR  ")); break;
+        case MODE_NEAR_DETECT: display.print(F("MODE:NEAR ")); break;
+        default:               display.print(F("MODE:OFF  ")); break;
+    }
+    display.println(passcodeEntered ? F("ARMED") : F("LOCKED"));
+
+    // Row 1: Passcode status
+    display.setCursor(0, 8);
+    if (line2) {
+        display.println(line2);
+    } else if (!passcodeEntered) {
+        // Show stars if digits have been entered, otherwise show prompt
+        uint8_t len = strlen(passcode);
+        if (len > 0) {
+            display.print(F("Code: "));
+            for (uint8_t i = 0; i < len; i++) {
+                display.print('*');
+            }
+            display.println();
+        } else {
+            display.println(F("Enter passcode..."));
+        }
+    }
+
+    // Row 2: Firing indicator (show for 1 second after firing)
+    display.setCursor(0, 16);
+    if (millis() - lastFireDisplayTime < 1000) {
+        display.println(F("Firing..."));
+    }
+
+    // Row 3: Always show distance
+    display.setCursor(0, 24);
+    display.print(F("Dist: "));
+    if (lastDistance >= 0) {
+        display.print((int)lastDistance);
+        display.print(F(" cm"));
+    } else {
+        display.print(F("---"));
+    }
+
+    display.display();
 }
 
 float getDistance() {
@@ -447,7 +532,6 @@ void printDistance(float distance) {
         Serial.println("Out of range");
     }
 }
-#pragma endregion FUNCTIONS
 
 //////////////////////////////////////////////////
                //  END CODE  //
